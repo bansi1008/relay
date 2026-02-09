@@ -79,22 +79,52 @@ app.post("/select-tunnel", express.json(), (req, res) => {
   res.json({ ok: true, selected: id });
 });
 
-app.all("*", (req, res) => {
-  const cookies = cookie.parse(req.headers.cookie || "");
+app.all("*", async (req, res) => {
+  const cookies = require("cookie").parse(req.headers.cookie || "");
   const id = cookies.tunnel;
 
   if (!id) return res.status(400).send("Missing tunnel cookie");
 
   const tunnel = tunnels.get(id);
-  if (!tunnel || !tunnel.target) {
-    return res.status(502).send("No active tunnel / target not registered");
+  if (!tunnel || !tunnel.ws) {
+    return res.status(502).send("No active tunnel");
   }
 
-  proxy.web(req, res, {
-    target: tunnel.target,
-    changeOrigin: true,
-    ws: true,
-    xfwd: true,
+  const chunks = [];
+  req.on("data", (c) => chunks.push(c));
+  req.on("end", () => {
+    const body = Buffer.concat(chunks);
+
+    const payload = {
+      method: req.method,
+      path: req.originalUrl,
+      headers: req.headers,
+      body: body.length ? body.toString("base64") : null,
+    };
+
+    tunnel.ws.send(JSON.stringify(payload));
+
+    tunnel.ws.once("message", (msg) => {
+      const resp = JSON.parse(msg.toString());
+
+      res.status(resp.status || 200);
+
+      if (resp.headers) {
+        for (const [k, v] of Object.entries(resp.headers)) {
+          if (
+            !["transfer-encoding", "content-length"].includes(k.toLowerCase())
+          ) {
+            res.setHeader(k, v);
+          }
+        }
+      }
+
+      if (resp.body) {
+        res.send(Buffer.from(resp.body, "base64"));
+      } else {
+        res.end();
+      }
+    });
   });
 });
 
